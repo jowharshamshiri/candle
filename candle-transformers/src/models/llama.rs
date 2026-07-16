@@ -144,7 +144,7 @@ impl Config {
 
 #[derive(Debug, Clone)]
 pub struct Cache {
-    masks: HashMap<usize, Tensor>,
+    masks: HashMap<(usize, usize), Tensor>,
     pub use_kv_cache: bool,
     kvs: Vec<Option<(Tensor, Tensor)>>,
     cos: Tensor,
@@ -215,15 +215,19 @@ impl Cache {
         })
     }
 
-    fn mask(&mut self, t: usize) -> Result<Tensor> {
-        if let Some(mask) = self.masks.get(&t) {
+    // Offset-aware causal mask: with a cached prefix of `offset` tokens the
+    // attention weights are (b, h, t, offset + t) — the prefix is fully
+    // visible, the new chunk is causal. Backport of the upstream fix that
+    // landed after 0.9.2 (chunked prefill support).
+    fn mask(&mut self, t: usize, offset: usize) -> Result<Tensor> {
+        if let Some(mask) = self.masks.get(&(t, offset)) {
             Ok(mask.clone())
         } else {
             let mask: Vec<_> = (0..t)
-                .flat_map(|i| (0..t).map(move |j| u8::from(j > i)))
+                .flat_map(|i| (0..offset + t).map(move |j| u8::from(j > i + offset)))
                 .collect();
-            let mask = Tensor::from_slice(&mask, (t, t), &self.device)?;
-            self.masks.insert(t, mask.clone());
+            let mask = Tensor::from_slice(&mask, (t, offset + t), &self.device)?;
+            self.masks.insert((t, offset), mask.clone());
             Ok(mask)
         }
     }
@@ -344,7 +348,7 @@ impl CausalSelfAttention {
             let att = if seq_len == 1 {
                 att
             } else {
-                let mask = cache.mask(seq_len)?.broadcast_as(att.shape())?;
+                let mask = cache.mask(seq_len, index_pos)?.broadcast_as(att.shape())?;
                 masked_fill(&att, &mask, f32::NEG_INFINITY)?
             };
 
