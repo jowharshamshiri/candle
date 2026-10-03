@@ -44,6 +44,12 @@ pub struct Config {
     pub multi_query: bool,
     pub parallel_attn: bool,
     pub bias: bool,
+    /// The width of the MLP's inner layer. Absent from the original configs,
+    /// where it is four times `hidden_size`; checkpoints that set it otherwise
+    /// (`Intel/tiny-random-falcon`: 128 hidden, 256 inner) failed to load with
+    /// a shape mismatch on `dense_h_to_4h`.
+    #[serde(default)]
+    pub ffn_hidden_size: Option<usize>,
 }
 
 impl Default for Config {
@@ -66,6 +72,7 @@ impl Default for Config {
             multi_query: true,
             parallel_attn: true,
             bias: false,
+            ffn_hidden_size: None,
         }
     }
 }
@@ -106,7 +113,12 @@ impl Config {
             multi_query: true,
             parallel_attn: true,
             bias: false,
+            ffn_hidden_size: None,
         }
+    }
+
+    fn ffn_hidden_size(&self) -> usize {
+        self.ffn_hidden_size.unwrap_or(4 * self.hidden_size)
     }
 
     fn head_dim(&self) -> usize {
@@ -336,9 +348,10 @@ struct FalconMlp {
 impl FalconMlp {
     fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let h = cfg.hidden_size;
+        let inner = cfg.ffn_hidden_size();
         let b = cfg.bias;
-        let dense_h_to_4h = linear(h, 4 * h, b, vb.pp("dense_h_to_4h"))?;
-        let dense_4h_to_h = linear(4 * h, h, b, vb.pp("dense_4h_to_h"))?;
+        let dense_h_to_4h = linear(h, inner, b, vb.pp("dense_h_to_4h"))?;
+        let dense_4h_to_h = linear(inner, h, b, vb.pp("dense_4h_to_h"))?;
         Ok(Self {
             dense_h_to_4h,
             dense_4h_to_h,
