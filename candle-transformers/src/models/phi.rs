@@ -58,7 +58,7 @@ struct RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
-    fn new(cfg: &Config, dev: &Device) -> Result<Self> {
+    fn new(cfg: &Config, dtype: DType, dev: &Device) -> Result<Self> {
         let dim = (cfg.partial_rotary_factor * cfg.head_dim() as f64) as usize;
         let inv_freq: Vec<_> = (0..dim)
             .step_by(2)
@@ -69,11 +69,14 @@ impl RotaryEmbedding {
         let t = Tensor::arange(0u32, cfg.max_position_embeddings as u32, dev)?
             .to_dtype(DType::F32)?
             .reshape((cfg.max_position_embeddings, 1))?;
+        // The angles are computed in f32 and the tables kept in the model's
+        // dtype: `rope` requires the activations and both tables to share a
+        // dtype, so f32 tables made every f16/bf16 phi fail its first forward.
         let freqs = t.matmul(&inv_freq)?;
         Ok(Self {
             dim,
-            sin: freqs.sin()?,
-            cos: freqs.cos()?,
+            sin: freqs.sin()?.to_dtype(dtype)?,
+            cos: freqs.cos()?.to_dtype(dtype)?,
         })
     }
 
@@ -160,7 +163,7 @@ impl Attention {
         let v_proj = linear(cfg.hidden_size, num_kv_heads * head_dim, vb.pp("v_proj"))?;
         let dense = linear(num_heads * head_dim, cfg.hidden_size, vb.pp("dense"))?;
         // Alternative rope scalings are not supported.
-        let rotary_emb = RotaryEmbedding::new(cfg, vb.device())?;
+        let rotary_emb = RotaryEmbedding::new(cfg, vb.dtype(), vb.device())?;
         let (q_layernorm, k_layernorm) = if cfg.qk_layernorm {
             let q_layernorm = layer_norm(head_dim, cfg.layer_norm_eps, vb.pp("q_layernorm"))?;
             let k_layernorm = layer_norm(head_dim, cfg.layer_norm_eps, vb.pp("k_layernorm"))?;
